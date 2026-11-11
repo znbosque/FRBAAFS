@@ -1,111 +1,114 @@
-# DRLCEFI Attendance and Feedback System
+# FRBAAFS - Face Recognition Attendance with SMS to Parents
 
-DRLCEFI is a Laravel 12, Blade, vanilla JavaScript, and SQLite student attendance application. Its dashboard opens directly to the login screen. Student face photos are stored on a private filesystem disk; passwords are hashed and the “Remember password” checkbox uses Laravel's persistent-session cookie, never browser local storage.
+A Laravel 12 application that manages student attendance using browser-based face
+recognition, and notifies parents by SMS every time their child is recognized.
 
-## Application modules
+## Modules
 
-| Module | Behavior |
+| Module | What it does |
 | --- | --- |
-| Login and accounts | Signup (Administrator role), verified email, persistent login, logout, login lockout after three bad attempts, profile/photo editing, password change, and six-digit email password reset |
-| Home | Searchable student directory, alphabetically ordered and paginated by 10, with student profile and administrator row actions |
-| Students | Student ID, names, course, year, school year, parent phone, regular/irregular status, private pose photos, profile, edit, archive and delete |
-| Attendance | Search and filters by date, subject, status, and course; date navigation is capped at today; archive selected date/school year |
-| Schedules | Administrator CRUD for school year, course, subject, instructor, room, weekday, and class start/end |
-| Reports | Daily sheet and date-range per-student Present/Late/Absent totals and percentage; weekday/course filters; browser print / Save as PDF |
-| Overview | Daily, weekly and monthly attendance summaries |
-| Notification History | Recorded notification attempts, attendance grouped by date, recent audit activity, and administrator preferences; no browser SMS sending |
-| Archives | School-year groups, student/attendance/schedule views, school-year restore, and administrator archiving |
-| Operation Mode | Separate, movable camera scanner backed by the local Python/OpenCV stream service; matched faces create one General check-in per day. |
+| **Auth** | Signup, login, real email verification (must click the emailed link), forgot/reset password |
+| **Home** | Dashboard with today's stats (present / late / absent / archived) and recent attendance |
+| **Students** | Enroll students with first name, optional middle name, surname, student ID, parent's phone number and webcam-captured face data |
+| **Attendance** | Live webcam scanner; recognized students are marked present/late (time out on a second scan) and an SMS is queued to their parents; manual entry fallback |
+| **Reports** | Daily, monthly and yearly attendance reports with per-student totals |
+| **History** | Every attendance record ever captured, filterable by student, date range and status |
+| **Archive** | Archived students (kept with full history) with restore |
+
+## How face recognition works
+
+- The browser uses [face-api.js](https://github.com/justadudewhohacks/face-api.js)
+  (bundled in `public/js` + `public/face-models`, no build step needed) to compute a
+  128-dimension face descriptor from the webcam.
+- Enrollment (`students/create`) captures several samples per student, stored as JSON
+  in `students.face_data`.
+- The scanner (`attendance/scan`) computes a descriptor and POSTs it to
+  `attendance/recognize`; `App\Services\FaceRecognition\FaceRecognitionService`
+  matches it against all enrolled students using Euclidean distance (threshold in
+  `config/services.php`, default 0.6).
+- On a match, attendance is recorded (late after the time in `SCHOOL_STARTS`) and the
+  `App\Jobs\SendAttendanceSms` job sends the SMS to the parent's number.
+
+## Requirements
+
+- PHP 8.2+ (extensions: pdo_sqlite or pdo_mysql, openssl, mbstring, fileinfo, gd)
+- Composer
+- A webcam and `https://` or `http://localhost` (browsers block the camera otherwise)
 
 ## Setup
 
-Requirements: PHP 8.2+, Composer, Node.js/npm, SQLite (or MySQL), and Python 3 for the optional camera service.
-
-```powershell
+```bash
 cd frbaafs
 composer install
-Copy-Item .env.example .env
+copy .env.example .env        # already done if you have .env
 php artisan key:generate
-npm install
-npm run build
-php artisan storage:link
-php artisan migrate --seed
+php artisan storage:link       # serves student photos
+php artisan migrate --seed    # sqlite by default; creates admin@example.com / password
 php artisan serve
 ```
 
-Open <http://localhost:8000>. Signup and email verification are available. On a completely empty database, the seeder creates a small example dataset and `admin@example.com`; it prints a randomly generated admin password once. Set `SEED_ADMIN_PASSWORD` in `.env` before first seeding if a chosen password is required. The seeder does not add example rows to a non-empty database.
+Open http://localhost:8000 and log in with the seeded account, or sign up —
+new accounts must verify their email before entering.
 
-For development, `MAIL_MAILER=log` writes verification links to the Laravel log. Password reset codes deliberately require SMTP; configure `MAIL_MAILER=smtp`, `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, and `MAIL_FROM_ADDRESS`. Codes are hashed in the database, six digits, one-time, and expire after 15 minutes.
+## Real email verification / password reset
 
-Email verification links are signed and can be opened on a different device from the one used to register. Verification does not sign in that device; return to the original device and log in there. For local phone testing, start the app with `php artisan serve --host=0.0.0.0`, set `APP_URL` to the computer's LAN address (for example, `http://192.168.1.20:8000`), and open the app on both devices using that address while connected to the same network. A `localhost` link points back to the phone itself. For real deployments, use a public HTTPS `APP_URL`.
+By default mail goes to `storage/logs/laravel.log` (`MAIL_MAILER=log`) so the flow
+works out of the box. For **real emails**, set SMTP credentials in `.env`
+(e.g. a Gmail App Password):
 
-## Attendance boundaries
-
-The browser face-recognition endpoint is a **recognition preview only**. Desktop Operation Mode uses the authenticated Laravel session to record one `General` check-in per active student per day after a face match; repeat scans do not check the student out. The dashboard does not send SMS. Attendance writes from external device clients require a bearer token configured as `ATTENDANCE_DEVICE_TOKEN` in `.env`:
-
-```http
-GET  /api/device/students
-POST /api/device/attendance
-Authorization: Bearer <ATTENDANCE_DEVICE_TOKEN>
+```
+MAIL_MAILER=smtp
+MAIL_HOST=smtp.gmail.com
+MAIL_PORT=587
+MAIL_USERNAME=yourgmail@gmail.com
+MAIL_PASSWORD=your-app-password
+MAIL_FROM_ADDRESS=yourgmail@gmail.com
 ```
 
-`GET /api/device/students` returns active students' photo data for a trusted device client. A `POST /api/device/attendance` JSON body contains `student_id` and `subject`. Its first scan is time-in; the next scan for that student/subject/date is time-out; another time-out is rejected. Status is Late only after a matching, non-archived schedule's start time; without a matching schedule it is Present. Run Laravel's scheduler (`php artisan schedule:work`) for ended class schedules to create Absent records for students without an attendance record.
+Verification links (`/verify-email/{id}/{hash}`) and reset links
+(`/reset-password/{token}`) are signed URLs generated by Laravel's mailer and expire
+automatically.
 
-## Raspberry Pi SIM7600G SMS relay
+## Real SMS to parents
 
-The PC Operation Mode scanner queues parent check-in messages in Laravel. A Raspberry Pi on the same network polls Laravel for messages and sends them through its attached SIM7600G; it does not need an inbound port or a Twilio account. Check-in and check-out notifications can be enabled separately under Notification History. Operation Mode itself only checks students in; check-out notifications are queued when a check-out is recorded through the device attendance API.
+`SMS_DRIVER` in `.env` controls delivery (see `app/Services/Sms/SmsService.php`):
 
-Run `php artisan migrate` on the Laravel computer to create the SMS outbox fields before starting the relay.
+- `log` (default) — messages are written to `storage/logs/laravel.log`; use this for
+  development. Every attempt is also recorded in the `sms_logs` table with status.
+- `twilio` — real SMS via Twilio REST API; fill `TWILIO_SID`, `TWILIO_TOKEN`,
+  `TWILIO_FROM` (or `SMS_FROM`).
+- `http` — any custom gateway receiving JSON `{to, from, message}`; set `SMS_HTTP_URL`.
 
-Install the SMS relay dependencies in the Pi's Python environment, connect the SIM7600G modem's AT serial port, and run this relay (use the actual Pi serial port exposed by the modem):
+Parent numbers should use international format (e.g. `+63917...`).
 
-```bash
-python3 -m pip install -r tools/requirements-sms.txt
-python3 tools/raspberry_pi_sms_relay.py \
-  --server http://<laravel-computer-lan-ip>:8000 \
-  --token "$ATTENDANCE_DEVICE_TOKEN" \
-  --modem /dev/ttyUSB2
+## Switching to MySQL
+
+Set these in `.env` (XAMPP users: start MySQL, create the `frbaafs` database):
+
+```
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=frbaafs
+DB_USERNAME=root
+DB_PASSWORD=
 ```
 
-The modem port and baud rate depend on the SIM7600G board and operating system; the relay defaults to 115200 baud and accepts `--baud` to override it. The Pi needs network access to Laravel, a working SIM with SMS service, and an available modem AT port. Keep the token private. SMS status is listed in Notification History; a provider/modem acceptance response is recorded as sent, but final handset delivery depends on the mobile network. The existing `tools/raspberry_pi_client.py --modem ...` option is for the separate Pi face-scanner workflow; use `raspberry_pi_sms_relay.py` when the PC Operation Mode camera should trigger the Pi modem.
-
-## Optional desktop OpenCV service
-
-Install OpenCV and NumPy in a Python environment on the computer with the webcam:
-
-```powershell
-python -m pip install opencv-python numpy
-python tools/operation_camera.py --origin http://localhost:8000
-```
-
-If the Laravel page is opened at `http://127.0.0.1:8000`, use that exact origin in `--origin`. Keep the camera service bound to localhost. Open **Operation Mode** in Laravel and launch the separate scanner window. On Windows, camera detection tries DirectShow, Media Foundation, and OpenCV's default backend. If the webcam does not appear, close other apps using it and check Windows Settings > Privacy & security > Camera. Face detection and matching use the bundled browser models and enrolled student descriptors; Python's optional `face-recognition` package is not required. The Python service only streams video; the authenticated Laravel page submits a matched descriptor to record attendance. The scanner records `General` attendance for today with status Present and does not automatically record time-out.
-
-## Optional Raspberry Pi attendance client
-
-The sample client syncs active student photos using the protected device endpoint, recognizes faces locally, and posts a scan only when an operator presses `C`:
-
-```bash
-python -m pip install -r tools/requirements-camera.txt
-python tools/raspberry_pi_client.py \
-  --server http://<laravel-host>:8000 \
-  --token "$ATTENDANCE_DEVICE_TOKEN" \
-  --subject "Networking"
-```
-
-An optional serial SMS modem can be enabled with `--modem /dev/ttyUSB0`; install `pyserial` separately. The client sends an SMS only after a device check-in response. Do not expose the device token in public source control or logs.
-
-## Security and storage
-
-- Student face photos are saved under `storage/app/private/student-faces` and served through an authenticated Laravel route. The device photo-sync endpoint requires the same bearer token as attendance writes.
-- Passwords and reset codes are hashed. Theme preference is the only persistent browser setting; passwords are never saved in local storage.
-- Audit events include profile, student, schedule, archive, notification-setting, and attendance changes.
-- Keep `.env`, SMTP credentials, and the device token private. Use HTTPS for deployed installations.
+Then run `php artisan migrate --seed`.
 
 ## Tests
 
-```powershell
+```bash
 php artisan test
-npm run build
 ```
 
-The feature tests cover account flows and lockout, password reset codes, student/photo enrollment, preview-only recognition, schedule-based status, protected device attendance, reports, and archives.
+26 tests cover registration + email verification + login/logout + password reset,
+student enrollment with face data, the recognize endpoint (match, reject, duplicate
+guard) and the SMS job.
+
+## Notes
+
+- Face descriptors (not photos) are what gets matched; captured snapshots are stored
+  on the `public` disk under `storage/app/public/students`.
+- Recognition runs entirely in the browser; only the descriptor is sent to the server.
+- `SCHOOL_STARTS` (default `08:00`, app timezone `APP_TIMEZONE`) decides "late".
